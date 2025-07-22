@@ -15,8 +15,11 @@ Some go code to help with rate limiting for the RIOT API.
 store := NewStore() // Create a new store instance
 rateLimiter := NewRateLimiter(store) // Create a new rate limiter instance
 
-rateLimiter.CheckFor("https://na1.api.riotgames.com/lol/summoner/v4/summoners/me", "get", "spread")
-// url, HTTP method, and strategy
+waitDuration := rateLimiter.CheckFor("https://na1.api.riotgames.com/lol/summoner/v4/summoners/me", "get", "spread")
+// url, HTTP method, and strategy (spread/burst)
+
+// Wait for the returned duration
+time.Sleep(waitDuration)
 
 // ... Perform your API call here ...
 resp, err := http.Get("https://na1.api.riotgames.com/lol/summoner/v4/summoners/me")
