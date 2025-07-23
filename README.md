@@ -18,6 +18,9 @@ rateLimiter := NewRateLimiter(store) // Create a new rate limiter instance
 waitDuration := rateLimiter.CheckFor("https://na1.api.riotgames.com/lol/summoner/v4/summoners/me", "get", "spread")
 // url, HTTP method, and strategy (spread/burst)
 
+// Optionally, you can reserve limits if you are planning to make multiple calls asynchronously.
+err := rateLimiter.Reserve("https://na1.api.riotgames.com/lol/summoner/v4/summoners/me", "get")
+
 // Wait for the returned duration
 time.Sleep(waitDuration)
 
@@ -25,8 +28,12 @@ time.Sleep(waitDuration)
 resp, err := http.Get("https://na1.api.riotgames.com/lol/summoner/v4/summoners/me")
 // ... handle the response ...
 
-// After the API call, update the rate limiter
+// After the API call, update the rate limiter if there is a response.
+// This will also remove the reservation made earlier.
 err = rateLimiter.UpdateFromHeaders("https://na1.api.riotgames.com/lol/summoner/v4/summoners/me", "get", resp.Header)
+
+// If there are no headers, you need to manually remove the reservation.
+err = rateLimiter.RemoveReservationN("https://na1.api.riotgames.com/lol/summoner/v4/summoners/me", "get", 1)
 ```
 
 You can also set the rate limits manually if needed:

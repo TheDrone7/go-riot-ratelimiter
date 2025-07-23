@@ -25,6 +25,76 @@ func NewRateLimiter(store Store) *RateLimiter {
 	}
 }
 
+// Reserve creates a reservation for a URL and method, incrementing the reservation count
+func (rl *RateLimiter) Reserve(url string, method string) error {
+	details, err := urlHelper(url, method)
+	if err != nil {
+		return err
+	}
+
+	platform := details.PlatformName
+	methodKey := platform + ":" + details.ServiceName + ":" + details.MethodName
+
+	// Platform reserve key
+	platformReserveKey := platform + ":reserve"
+	if reserveCountRaw, exists := rl.cache.Get(platformReserveKey); exists {
+		if count, ok := reserveCountRaw.(int); ok {
+			rl.cache.Set(platformReserveKey, count+1)
+		}
+	} else {
+		rl.cache.Set(platformReserveKey, 1)
+	}
+
+	// Method reserve key
+	methodReserveKey := methodKey + ":reserve"
+	if reserveCountRaw, exists := rl.cache.Get(methodReserveKey); exists {
+		if count, ok := reserveCountRaw.(int); ok {
+			rl.cache.Set(methodReserveKey, count+1)
+		}
+	} else {
+		rl.cache.Set(methodReserveKey, 1)
+	}
+
+	return nil
+}
+
+// RemoveReservationN reduces reservations for a URL and method by n (but not lower than 0)
+func (rl *RateLimiter) RemoveReservationN(url string, method string, n int) error {
+	details, err := urlHelper(url, method)
+	if err != nil {
+		return err
+	}
+
+	platform := details.PlatformName
+	methodKey := platform + ":" + details.ServiceName + ":" + details.MethodName
+
+	// Reduce platform reservation by n
+	platformReserveKey := platform + ":reserve"
+	if reserveCountRaw, exists := rl.cache.Get(platformReserveKey); exists {
+		if count, ok := reserveCountRaw.(int); ok {
+			newCount := count - n
+			if newCount < 0 {
+				newCount = 0
+			}
+			rl.cache.Set(platformReserveKey, newCount)
+		}
+	}
+
+	// Reduce method reservation by n
+	methodReserveKey := methodKey + ":reserve"
+	if reserveCountRaw, exists := rl.cache.Get(methodReserveKey); exists {
+		if count, ok := reserveCountRaw.(int); ok {
+			newCount := count - n
+			if newCount < 0 {
+				newCount = 0
+			}
+			rl.cache.Set(methodReserveKey, newCount)
+		}
+	}
+
+	return nil
+}
+
 // Extracts platform, service, and method names from the URL and method
 // Then updates the ratelimits in the cache
 // Returns an error if the URL or method is invalid
@@ -81,6 +151,8 @@ func (rl *RateLimiter) UpdateFromHeaders(url string, method string, headers http
 	if err != nil {
 		return err
 	}
+
+	rl.RemoveReservationN(url, method, 1)
 
 	appLimitPairs, err := parseHeader(appRateLimit)
 	if err != nil {
@@ -174,12 +246,34 @@ func (rl *RateLimiter) GetWaitFor(url string, httpMethod string, strategy LimitS
 		}
 	}
 
+	platformReserveCount := 0
+	if reserveCountRaw, exists := rl.cache.Get(platform + ":reserve"); exists {
+		if count, ok := reserveCountRaw.(int); ok {
+			platformReserveCount = count
+		}
+	}
+
+	methodReserveCount := 0
+	if reserveCountRaw, exists := rl.cache.Get(methodKey + ":reserve"); exists {
+		if count, ok := reserveCountRaw.(int); ok {
+			methodReserveCount = count
+		}
+	}
+
 	allLimits := append(appLimits, methodLimits...)
 	waitTime := time.Duration(0)
 
 	if strategy == LIMIT_STRATEGY_BURST {
-		for _, limit := range allLimits {
-			if limit.Counts >= limit.Limit {
+		for i, limit := range allLimits {
+			// Add reservation count to effective counts
+			reserveCount := platformReserveCount
+			if i >= len(appLimits) {
+				// This is a method limit, use method reserve count
+				reserveCount = methodReserveCount
+			}
+
+			// Check if current count + reservations >= limit
+			if limit.Counts+reserveCount >= limit.Limit {
 				timeElapsed := now.Sub(limit.LastAt)
 				if timeElapsed < limit.Duration {
 					tempWait := limit.Duration - timeElapsed
@@ -190,8 +284,17 @@ func (rl *RateLimiter) GetWaitFor(url string, httpMethod string, strategy LimitS
 			}
 		}
 	} else {
-		for _, limit := range allLimits {
-			if limit.Counts >= limit.Limit {
+		for i, limit := range allLimits {
+			// Add reservation count to effective counts
+			reserveCount := platformReserveCount
+			if i >= len(appLimits) {
+				// This is a method limit, use method reserve count
+				reserveCount = methodReserveCount
+			}
+
+			effectiveCounts := limit.Counts + reserveCount
+
+			if effectiveCounts >= limit.Limit {
 				timeElapsed := now.Sub(limit.LastAt)
 				if timeElapsed < limit.Duration {
 					tempWait := limit.Duration - timeElapsed
@@ -202,7 +305,7 @@ func (rl *RateLimiter) GetWaitFor(url string, httpMethod string, strategy LimitS
 			} else {
 				timeElapsed := now.Sub(limit.LastAt)
 				if timeElapsed < limit.Duration {
-					remainingRequests := limit.Limit - limit.Counts
+					remainingRequests := limit.Limit - effectiveCounts
 					remainingTime := limit.Duration - timeElapsed
 
 					if remainingRequests > 0 && remainingTime > 0 {
